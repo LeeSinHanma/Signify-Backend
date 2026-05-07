@@ -1,8 +1,9 @@
 import threading
-from collections import deque
+from collections import deque, Counter
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.request import urlretrieve
+import time
 
 import cv2
 import joblib
@@ -10,43 +11,54 @@ import mediapipe as mp
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
+import calibrator
 
-BaseOptions = mp.tasks.BaseOptions
-HandLandmarker = mp.tasks.vision.HandLandmarker
-HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
-VisionRunningMode = mp.tasks.vision.RunningMode
-
+# Constants
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
 LANDMARKER_PATH = Path(__file__).resolve().parent / "hand_landmarker.task"
 CLASSIFIER_PATH = Path(__file__).resolve().parent / "models" / "vowel_random_forest.joblib"
-DEFAULT_THRESHOLD = 0.65
-DEFAULT_SMOOTH_WINDOW = 6
+DEFAULT_THRESHOLD = 0.70
+WINDOW_SIZE = 30
+FEATURE_COUNT = 63
+MOTION_LETTERS = ['J', 'Z']
 
-app = FastAPI(title="Sign Language Local Backend", version="1.0.0")
+app = FastAPI(title="Sign Language Motion Backend", version="1.1.0")
 
+# Global State
 state_lock = threading.Lock()
-clf = None
+clf_frame = None
+clf_window = None
 landmarker = None
 class_labels: List[str] = []
-prob_history = deque(maxlen=DEFAULT_SMOOTH_WINDOW)
 
+# Sliding window for landmarks (Memory)
+landmark_history = deque(maxlen=WINDOW_SIZE)
 
 class PredictResponse(BaseModel):
     hand_detected: bool
     label: str
-    raw_label: Optional[str] = None
+    prediction_type: str  # "Vote", "Motion", or "Buffering"
     confidence: float
     probabilities: Dict[str, float]
     handedness: Optional[str] = None
-    handedness_score: Optional[float] = None
     landmarks: Optional[List[Dict[str, float]]] = None
-
 
 class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     labels: List[str]
 
+class CalibrateResponse(BaseModel):
+    success: bool
+    message: str
+    hand_detected: bool
+
+class RetrainResponse(BaseModel):
+    success: bool
+    message: str
+    accuracy: float
+    calibration_samples_used: int
+    labels: List[str]
 
 def ensure_model_file(model_path: Path) -> None:
     if model_path.exists() and model_path.stat().st_size > 0:
@@ -54,20 +66,14 @@ def ensure_model_file(model_path: Path) -> None:
     print(f"Downloading model to: {model_path}")
     urlretrieve(MODEL_URL, model_path)
 
-
 def normalize_landmarks(hand_landmarks) -> List[float]:
     wrist = hand_landmarks[0]
-
     centered = []
     for lm in hand_landmarks:
         centered.extend([lm.x - wrist.x, lm.y - wrist.y, lm.z - wrist.z])
-
     max_abs = max(abs(v) for v in centered)
-    if max_abs == 0:
-        return centered
-
+    if max_abs == 0: return centered
     return [v / max_abs for v in centered]
-
 
 def decode_image_bytes(file_bytes: bytes):
     np_arr = np.frombuffer(file_bytes, dtype=np.uint8)
@@ -76,19 +82,18 @@ def decode_image_bytes(file_bytes: bytes):
         raise ValueError("Could not decode image bytes.")
     return frame
 
-
 @app.on_event("startup")
 def startup_event() -> None:
-    global clf, landmarker, class_labels
-
+    global clf_frame, clf_window, landmarker, class_labels
     if not CLASSIFIER_PATH.exists():
-        raise RuntimeError(f"Trained classifier not found: {CLASSIFIER_PATH}")
+        print(f"Warning: Classifier not found at {CLASSIFIER_PATH}. Run training first.")
+        return
 
     ensure_model_file(LANDMARKER_PATH)
-
     payload = joblib.load(CLASSIFIER_PATH)
-    clf = payload["model"]
-    class_labels = [str(x) for x in clf.classes_]
+    clf_frame = payload["frame_model"]
+    clf_window = payload["window_model"]
+    class_labels = [str(x) for x in payload["labels"]]
 
     options = HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=str(LANDMARKER_PATH)),
@@ -99,95 +104,138 @@ def startup_event() -> None:
     )
     landmarker = HandLandmarker.create_from_options(options)
 
-
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(
         status="ok",
-        model_loaded=clf is not None and landmarker is not None,
+        model_loaded=clf_window is not None,
         labels=class_labels,
     )
-
 
 @app.post("/predict", response_model=PredictResponse)
 async def predict(
     file: UploadFile = File(...),
     threshold: float = Form(DEFAULT_THRESHOLD),
-    smooth_window: int = Form(DEFAULT_SMOOTH_WINDOW),
     include_landmarks: bool = Form(False),
 ) -> PredictResponse:
-    global prob_history
-
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Upload an image file (image/* content type).")
-
-    if smooth_window < 1:
-        raise HTTPException(status_code=400, detail="smooth_window must be >= 1")
-
-    if threshold < 0 or threshold > 1:
-        raise HTTPException(status_code=400, detail="threshold must be between 0 and 1")
+    global landmark_history
 
     file_bytes = await file.read()
-    if not file_bytes:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-
     try:
         bgr = decode_image_bytes(file_bytes)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc))
 
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
     with state_lock:
-        if prob_history.maxlen != smooth_window:
-            old = list(prob_history)
-            prob_history = deque(old[-smooth_window:], maxlen=smooth_window)
+        if landmarker is None or clf_window is None:
+            raise HTTPException(status_code=503, detail="Model not loaded")
 
         result = landmarker.detect(mp_image)
 
         if not result.hand_landmarks:
+            landmark_history.clear() # Clear memory if hand is lost
             return PredictResponse(
                 hand_detected=False,
                 label="NO_HAND",
+                prediction_type="None",
                 confidence=0.0,
                 probabilities={label: 0.0 for label in class_labels},
             )
 
         hand_landmarks = result.hand_landmarks[0]
         features = normalize_landmarks(hand_landmarks)
-        probs = clf.predict_proba(np.array([features], dtype=np.float32))[0]
+        landmark_history.append(features)
 
-        prob_history.append(probs)
-        avg_probs = np.mean(np.stack(prob_history, axis=0), axis=0)
+        # Consensus Logic
+        label = "ANALYZING"
+        pred_type = "Buffering"
+        pred_conf = 0.0
+        probabilities = {label: 0.0 for label in class_labels}
 
-        pred_idx = int(np.argmax(avg_probs))
-        raw_label = str(class_labels[pred_idx])
-        pred_conf = float(avg_probs[pred_idx])
-        label = raw_label if pred_conf >= threshold else "UNKNOWN"
+        if len(landmark_history) == WINDOW_SIZE:
+            # 1. Motion Prediction
+            window_flat = []
+            for f in landmark_history: window_flat.extend(f)
+            w_probs = clf_window.predict_proba(np.array([window_flat], dtype=np.float32))[0]
+            w_idx = int(np.argmax(w_probs))
+            w_label = clf_window.classes_[w_idx]
+            w_conf = float(w_probs[w_idx])
 
-        probabilities = {str(class_labels[i]): float(avg_probs[i]) for i in range(len(class_labels))}
+            # 2. Voting Prediction
+            f_batch = np.array(list(landmark_history), dtype=np.float32)
+            f_preds = clf_frame.predict(f_batch)
+            vote_counts = Counter(f_preds)
+            v_label, v_count = vote_counts.most_common(1)[0]
+            v_conf = v_count / WINDOW_SIZE
 
-        handedness = None
-        handedness_score = None
-        if result.handedness and result.handedness[0]:
-            handedness = result.handedness[0][0].category_name
-            handedness_score = float(result.handedness[0][0].score)
+            # 3. Decision
+            if w_label in MOTION_LETTERS and w_conf > 0.85:
+                label = w_label
+                pred_conf = w_conf
+                pred_type = "Motion"
+            elif v_conf >= threshold:
+                label = v_label
+                pred_conf = v_conf
+                pred_type = "Vote"
+            else:
+                label = "UNCERTAIN"
+                pred_conf = v_conf
+                pred_type = "Mixed"
+            
+            probabilities = {str(clf_window.classes_[i]): float(w_probs[i]) for i in range(len(clf_window.classes_))}
 
-        landmarks = None
-        if include_landmarks:
-            landmarks = [
-                {"x": float(lm.x), "y": float(lm.y), "z": float(lm.z)}
-                for lm in hand_landmarks
-            ]
+        # Meta Data
+        handedness = result.handedness[0][0].category_name if result.handedness else None
+        landmarks = [{"x": float(lm.x), "y": float(lm.y), "z": float(lm.z)} for lm in hand_landmarks] if include_landmarks else None
 
     return PredictResponse(
         hand_detected=True,
         label=label,
-        raw_label=raw_label,
+        prediction_type=pred_type,
         confidence=pred_conf,
         probabilities=probabilities,
         handedness=handedness,
-        handedness_score=handedness_score,
         landmarks=landmarks,
+    )
+
+@app.post("/calibrate", response_model=CalibrateResponse)
+async def calibrate_endpoint(file: UploadFile = File(...), label: str = Form(...)) -> CalibrateResponse:
+    # Basic static calibration (stays single-frame for now)
+    file_bytes = await file.read()
+    bgr = decode_image_bytes(file_bytes)
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+    with state_lock:
+        result = landmarker.detect(mp_image)
+        if not result.hand_landmarks:
+            return CalibrateResponse(success=False, message="No hand detected", hand_detected=False)
+
+        features = normalize_landmarks(result.hand_landmarks[0])
+        calibrator.add_calibration_sample(features, label)
+
+    return CalibrateResponse(success=True, message=f"Added '{label}'", hand_detected=True)
+
+@app.post("/retrain", response_model=RetrainResponse)
+async def retrain_endpoint() -> RetrainResponse:
+    global clf_frame, clf_window, class_labels
+    base_csv_path = Path(__file__).resolve().parent / "data" / "raw" / "vowels_from_images_landmarks.csv"
+    
+    with state_lock:
+        try:
+            new_clf, new_labels, accuracy, samples_used = calibrator.retrain_model(base_csv_path, CLASSIFIER_PATH)
+            # Re-load the dual models from the newly saved file
+            payload = joblib.load(CLASSIFIER_PATH)
+            clf_frame = payload["frame_model"]
+            clf_window = payload["window_model"]
+            class_labels = [str(x) for x in payload["labels"]]
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    return RetrainResponse(
+        success=True, message="Retrained unified model", accuracy=accuracy,
+        calibration_samples_used=samples_used, labels=class_labels
     )
