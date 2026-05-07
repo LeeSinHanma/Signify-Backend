@@ -172,7 +172,7 @@ async def predict(
             v_conf = v_count / WINDOW_SIZE
 
             # 3. Decision
-            if w_label in MOTION_LETTERS and w_conf > 0.85:
+            if w_label in MOTION_LETTERS and w_conf > 0.60:
                 label = w_label
                 pred_conf = w_conf
                 pred_type = "Motion"

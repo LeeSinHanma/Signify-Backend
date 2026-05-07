@@ -111,8 +111,8 @@ def main() -> None:
                     v_conf = v_count / WINDOW_SIZE
 
                     # 3. Decision Logic
-                    if w_label in MOTION_LETTERS and w_conf > 0.85:
-                        # Prioritize Motion Model for J and Z
+                    if w_label in MOTION_LETTERS and w_conf > 0.60:
+                        # Prioritize Motion Model for J and Z (Lowered threshold from 0.85)
                         prediction_text = f"{w_label} (Motion:{w_conf:.2f})"
                         color = (255, 100, 0)
                     elif v_conf >= args.threshold:
