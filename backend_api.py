@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.request import urlretrieve
 import time
+from contextlib import asynccontextmanager
 
 import cv2
 import joblib
@@ -12,6 +13,14 @@ import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 import calibrator
+from accounts import AccountManager
+
+account_manager = AccountManager()
+
+BaseOptions = mp.tasks.BaseOptions
+HandLandmarker = mp.tasks.vision.HandLandmarker
+HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
+VisionRunningMode = mp.tasks.vision.RunningMode
 
 # Constants
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
@@ -21,8 +30,6 @@ DEFAULT_THRESHOLD = 0.70
 WINDOW_SIZE = 30
 FEATURE_COUNT = 63
 MOTION_LETTERS = ['J', 'Z']
-
-app = FastAPI(title="Sign Language Motion Backend", version="1.1.0")
 
 # Global State
 state_lock = threading.Lock()
@@ -60,6 +67,21 @@ class RetrainResponse(BaseModel):
     calibration_samples_used: int
     labels: List[str]
 
+class AccountCreateRequest(BaseModel):
+    username: str
+    password: str
+    name: str
+    mastery_level: str = "Beginner"
+
+class AccountLoginRequest(BaseModel):
+    username: str
+    password: str
+
+class AccountUpdateProgressRequest(BaseModel):
+    username: str
+    letter: str
+    level: int
+
 def ensure_model_file(model_path: Path) -> None:
     if model_path.exists() and model_path.stat().st_size > 0:
         return
@@ -82,27 +104,31 @@ def decode_image_bytes(file_bytes: bytes):
         raise ValueError("Could not decode image bytes.")
     return frame
 
-@app.on_event("startup")
-def startup_event() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global clf_frame, clf_window, landmarker, class_labels
     if not CLASSIFIER_PATH.exists():
         print(f"Warning: Classifier not found at {CLASSIFIER_PATH}. Run training first.")
-        return
+    else:
+        ensure_model_file(LANDMARKER_PATH)
+        payload = joblib.load(CLASSIFIER_PATH)
+        clf_frame = payload["frame_model"]
+        clf_window = payload["window_model"]
+        class_labels = [str(x) for x in payload["labels"]]
 
-    ensure_model_file(LANDMARKER_PATH)
-    payload = joblib.load(CLASSIFIER_PATH)
-    clf_frame = payload["frame_model"]
-    clf_window = payload["window_model"]
-    class_labels = [str(x) for x in payload["labels"]]
+        options = HandLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=str(LANDMARKER_PATH)),
+            running_mode=VisionRunningMode.IMAGE,
+            num_hands=1,
+            min_hand_detection_confidence=0.5,
+            min_hand_presence_confidence=0.5,
+        )
+        landmarker = HandLandmarker.create_from_options(options)
+    
+    yield
+    # Cleanup can be added here if needed
 
-    options = HandLandmarkerOptions(
-        base_options=BaseOptions(model_asset_path=str(LANDMARKER_PATH)),
-        running_mode=VisionRunningMode.IMAGE,
-        num_hands=1,
-        min_hand_detection_confidence=0.5,
-        min_hand_presence_confidence=0.5,
-    )
-    landmarker = HandLandmarker.create_from_options(options)
+app = FastAPI(title="Sign Language Motion Backend", version="1.1.0", lifespan=lifespan)
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
@@ -239,3 +265,31 @@ async def retrain_endpoint() -> RetrainResponse:
         success=True, message="Retrained unified model", accuracy=accuracy,
         calibration_samples_used=samples_used, labels=class_labels
     )
+
+@app.post("/account/create", tags=["Account"])
+async def create_account(req: AccountCreateRequest):
+    success, msg = account_manager.create_account(req.username, req.password, req.name, req.mastery_level)
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"success": True, "message": msg}
+
+@app.post("/account/login", tags=["Account"])
+async def login_account(req: AccountLoginRequest):
+    success, data = account_manager.login(req.username, req.password)
+    if not success:
+        raise HTTPException(status_code=401, detail=data)
+    return {"success": True, "account": data}
+
+@app.get("/account/{username}", tags=["Account"])
+async def get_account(username: str):
+    account = account_manager.get_account(username)
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found.")
+    return {"success": True, "account": account}
+
+@app.post("/account/progress", tags=["Account"])
+async def update_progress(req: AccountUpdateProgressRequest):
+    success, msg = account_manager.update_progress(req.username, req.letter, req.level)
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"success": True, "message": msg}

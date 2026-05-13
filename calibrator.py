@@ -83,6 +83,16 @@ def retrain_model(base_csv_path: Path, model_out_path: Path):
     import train_motion
     
     print("Loading datasets...")
+    
+    # 1. Train Per-Frame Model (Static)
+    f_feat, f_lab = train_motion.load_raw_frames()
+    X_f = np.array(f_feat, dtype=np.float32)
+    y_f = np.array(f_lab)
+    clf_frame = RandomForestClassifier(n_estimators=100, random_state=42, class_weight="balanced", n_jobs=-1)
+    if len(X_f) > 0:
+        clf_frame.fit(X_f, y_f)
+    
+    # 2. Train Windowed Model (Motion)
     s_feat, s_lab = train_motion.load_static_as_sequences(base_csv_path)
     c_feat, c_lab = train_motion.load_static_as_sequences(CALIBRATION_CSV_PATH)
     m_feat, m_lab = train_motion.load_motion_sequences(MOTION_CSV_PATH)
@@ -93,25 +103,29 @@ def retrain_model(base_csv_path: Path, model_out_path: Path):
     if not all_features:
         raise ValueError("No data available for training.")
         
-    X = np.array(all_features, dtype=np.float32)
-    y = np.array(all_labels)
+    X_w = np.array(all_features, dtype=np.float32)
+    y_w = np.array(all_labels)
     
-    clf = RandomForestClassifier(
-        n_estimators=300,
+    clf_window = RandomForestClassifier(
+        n_estimators=200,
         random_state=42,
         class_weight="balanced",
         n_jobs=-1,
     )
     
-    clf.fit(X, y)
+    clf_window.fit(X_w, y_w)
     
     # Calculate training accuracy
-    y_pred = clf.predict(X)
-    accuracy = accuracy_score(y, y_pred)
+    y_pred = clf_window.predict(X_w)
+    accuracy = accuracy_score(y_w, y_pred)
     
-    unique_labels = sorted(set(y.tolist()))
+    unique_labels = sorted(set(y_w.tolist()))
     
     model_out_path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump({"model": clf, "labels": unique_labels}, model_out_path)
+    joblib.dump({
+        "frame_model": clf_frame,
+        "window_model": clf_window,
+        "labels": unique_labels
+    }, model_out_path)
     
-    return clf, unique_labels, float(accuracy), len(c_lab) + len(m_lab)
+    return clf_window, unique_labels, float(accuracy), len(c_lab) + len(m_lab)
