@@ -37,6 +37,7 @@ clf_frame = None
 clf_window = None
 landmarker = None
 class_labels: List[str] = []
+single_model_mode = False
 
 # Sliding window for landmarks (Memory)
 landmark_history = deque(maxlen=WINDOW_SIZE)
@@ -112,9 +113,22 @@ async def lifespan(app: FastAPI):
     else:
         ensure_model_file(LANDMARKER_PATH)
         payload = joblib.load(CLASSIFIER_PATH)
-        clf_frame = payload["frame_model"]
-        clf_window = payload["window_model"]
-        class_labels = [str(x) for x in payload["labels"]]
+        
+        # Support both single-model and dual-model payloads
+        global single_model_mode
+        if "frame_model" in payload and "window_model" in payload:
+            clf_frame = payload["frame_model"]
+            clf_window = payload["window_model"]
+            single_model_mode = False
+        elif "model" in payload:
+            # Current train.py saves as "model"
+            clf_frame = payload["model"]
+            clf_window = None
+            single_model_mode = True
+        else:
+            raise RuntimeError(f"Unrecognized model payload. Keys: {list(payload.keys())}")
+        
+        class_labels = [str(x) for x in payload.get("labels", [])]
 
         options = HandLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=str(LANDMARKER_PATH)),
@@ -156,7 +170,7 @@ async def predict(
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
     with state_lock:
-        if landmarker is None or clf_window is None:
+        if landmarker is None or clf_frame is None:
             raise HTTPException(status_code=503, detail="Model not loaded")
 
         result = landmarker.detect(mp_image)
@@ -182,36 +196,52 @@ async def predict(
         probabilities = {label: 0.0 for label in class_labels}
 
         if len(landmark_history) == WINDOW_SIZE:
-            # 1. Motion Prediction
-            window_flat = []
-            for f in landmark_history: window_flat.extend(f)
-            w_probs = clf_window.predict_proba(np.array([window_flat], dtype=np.float32))[0]
-            w_idx = int(np.argmax(w_probs))
-            w_label = clf_window.classes_[w_idx]
-            w_conf = float(w_probs[w_idx])
-
-            # 2. Voting Prediction
+            # Build frame batch for voting
             f_batch = np.array(list(landmark_history), dtype=np.float32)
             f_preds = clf_frame.predict(f_batch)
             vote_counts = Counter(f_preds)
             v_label, v_count = vote_counts.most_common(1)[0]
             v_conf = v_count / WINDOW_SIZE
 
-            # 3. Decision
-            if w_label in MOTION_LETTERS and w_conf > 0.60:
-                label = w_label
-                pred_conf = w_conf
-                pred_type = "Motion"
-            elif v_conf >= threshold:
-                label = v_label
-                pred_conf = v_conf
-                pred_type = "Vote"
+            if clf_window is not None and not single_model_mode:
+                # Dual-model mode: use window model for motion detection
+                window_flat = []
+                for f in landmark_history: window_flat.extend(f)
+                w_probs = clf_window.predict_proba(np.array([window_flat], dtype=np.float32))[0]
+                w_idx = int(np.argmax(w_probs))
+                w_label = clf_window.classes_[w_idx]
+                w_conf = float(w_probs[w_idx])
+
+                # Decision using window+vote
+                if w_label in MOTION_LETTERS and w_conf > 0.60:
+                    label = w_label
+                    pred_conf = w_conf
+                    pred_type = "Motion"
+                elif v_conf >= threshold:
+                    label = v_label
+                    pred_conf = v_conf
+                    pred_type = "Vote"
+                else:
+                    label = "UNCERTAIN"
+                    pred_conf = v_conf
+                    pred_type = "Mixed"
+                
+                probabilities = {str(clf_window.classes_[i]): float(w_probs[i]) for i in range(len(clf_window.classes_))}
             else:
-                label = "UNCERTAIN"
-                pred_conf = v_conf
-                pred_type = "Mixed"
-            
-            probabilities = {str(clf_window.classes_[i]): float(w_probs[i]) for i in range(len(clf_window.classes_))}
+                # Single-model mode: use frame voting only
+                if v_conf >= threshold:
+                    label = v_label
+                    pred_conf = v_conf
+                    pred_type = "Vote"
+                else:
+                    label = "UNCERTAIN"
+                    pred_conf = v_conf
+                    pred_type = "Mixed"
+                
+                # Average probabilities across the window
+                probs = clf_frame.predict_proba(f_batch)
+                avg_probs = np.mean(probs, axis=0)
+                probabilities = {str(clf_frame.classes_[i]): float(avg_probs[i]) for i in range(len(clf_frame.classes_))}
 
         # Meta Data
         handedness = result.handedness[0][0].category_name if result.handedness else None
@@ -247,22 +277,28 @@ async def calibrate_endpoint(file: UploadFile = File(...), label: str = Form(...
 
 @app.post("/retrain", response_model=RetrainResponse)
 async def retrain_endpoint() -> RetrainResponse:
-    global clf_frame, clf_window, class_labels
+    global clf_frame, clf_window, class_labels, single_model_mode
     base_csv_path = Path(__file__).resolve().parent / "data" / "raw" / "vowels_from_images_landmarks.csv"
     
     with state_lock:
         try:
             new_clf, new_labels, accuracy, samples_used = calibrator.retrain_model(base_csv_path, CLASSIFIER_PATH)
-            # Re-load the dual models from the newly saved file
+            # Re-load the model from the newly saved file
             payload = joblib.load(CLASSIFIER_PATH)
-            clf_frame = payload["frame_model"]
-            clf_window = payload["window_model"]
-            class_labels = [str(x) for x in payload["labels"]]
+            if "frame_model" in payload and "window_model" in payload:
+                clf_frame = payload["frame_model"]
+                clf_window = payload["window_model"]
+                single_model_mode = False
+            elif "model" in payload:
+                clf_frame = payload["model"]
+                clf_window = None
+                single_model_mode = True
+            class_labels = [str(x) for x in payload.get("labels", [])]
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
     return RetrainResponse(
-        success=True, message="Retrained unified model", accuracy=accuracy,
+        success=True, message="Retrained model", accuracy=accuracy,
         calibration_samples_used=samples_used, labels=class_labels
     )
 
