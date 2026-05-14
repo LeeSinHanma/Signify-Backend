@@ -96,7 +96,20 @@ def main() -> None:
     parser.add_argument("--output-csv", type=Path, default=DEFAULT_OUTPUT_CSV, help="Output CSV path")
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH, help="MediaPipe hand landmarker .task path")
     parser.add_argument("--rebuild", action="store_true", help="Rebuild from scratch (delete and recreate CSV)")
-    arDiscover available labels dynamically
+    args = parser.parse_args()
+
+    # Ensure model exists
+    ensure_model_file(args.model)
+
+    # Handle rebuild flag
+    if args.rebuild and args.output_csv.exists():
+        args.output_csv.unlink()
+        print(f"Deleted {args.output_csv} for rebuild")
+
+    # Create headers if needed
+    write_header_if_needed(args.output_csv)
+
+    # Discover available labels dynamically
     available_labels = get_available_labels(args.images_dir)
     if not available_labels:
         print(f"No label folders found in {args.images_dir}")
@@ -125,20 +138,7 @@ def main() -> None:
         with args.output_csv.open("a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
 
-            for label in available_labels
-        min_hand_detection_confidence=0.5,
-        min_hand_presence_confidence=0.5,
-    )
-
-    total_new = 0
-    total_skipped_existing = 0
-    total_failed = 0
-
-    with HandLandmarker.create_from_options(options) as landmarker:
-        with args.output_csv.open("a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-
-            for label in VALID_LABELS:
+            for label in available_labels:
                 label_dir = args.images_dir / label
                 image_files = collect_image_files(label_dir) if label_dir.exists() else []
                 print(f"\nLabel {label}: found {len(image_files)} image(s)")

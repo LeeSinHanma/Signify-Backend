@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-CSV_PATH = Path(__file__).resolve().parent / "data" / "raw" / "vowels_landmarks.csv"
+CSV_PATH = Path(__file__).resolve().parent / "data" / "raw" / "vowels_from_images_landmarks.csv"
 FEATURE_COUNT = 63
 
 

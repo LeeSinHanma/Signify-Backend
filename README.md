@@ -9,6 +9,73 @@ Local sign-language hand landmark and letter prediction project.
 - Runs a local FastAPI backend for prediction
 - Integrates with a C# WPF client through HTTP
 
+## Requirements
+
+- Windows
+- Python 3.13 or compatible
+- PowerShell
+- Webcam
+
+---
+
+## Quick Start: Running the Backend with FastAPI
+
+Follow these steps to get the backend running locally with Uvicorn.
+
+### Step 1: Initial Setup (One-Time)
+
+Open PowerShell in the project folder and run the automated setup:
+
+```powershell
+.\setup.ps1
+```
+
+This will:
+
+- Create a virtual environment (`venv`)
+- Activate the virtual environment
+- Upgrade `pip`
+- Install all dependencies from `requirements.txt`
+
+### Step 2: Activate the Virtual Environment
+
+Every time you start a new PowerShell session, activate the virtual environment:
+
+```powershell
+.\venv\Scripts\Activate.ps1
+```
+
+You should see `(venv)` appear at the beginning of your PowerShell prompt, indicating the virtual environment is active.
+
+### Step 3: Start the Backend Server
+
+Run the FastAPI backend with Uvicorn:
+
+```powershell
+python -m uvicorn backend_api:app --host 127.0.0.1 --port 8000
+```
+
+You should see output like:
+
+```
+INFO:     Uvicorn running on http://127.0.0.1:8000
+INFO:     Application startup complete
+```
+
+### Step 4: Verify the Backend is Running
+
+Open your browser and visit:
+
+- **API Documentation**: http://127.0.0.1:8000/docs
+- **Health Check**: http://127.0.0.1:8000/health
+- **Alternative Docs**: http://127.0.0.1:8000/redoc
+
+### Step 5: Stop the Backend
+
+To stop the server, press `Ctrl+C` in the PowerShell window.
+
+---
+
 ## Project Structure
 
 - `backend_api.py` - local FastAPI prediction backend
@@ -23,33 +90,11 @@ Local sign-language hand landmark and letter prediction project.
 - `data/raw/` - generated CSV datasets
 - `models/` - trained model files
 
-## Requirements
-
-- Windows
-- Python 3.13 or compatible
-- PowerShell
-- Webcam
-
-## Quick Setup
-
-1. Clone the repository.
-2. Open PowerShell in the project folder.
-3. Run:
-
-```powershell
-.\setup.ps1
-```
-
-This will:
-
-- create `venv` if it does not exist
-- activate the virtual environment
-- upgrade `pip`
-- install all dependencies from `requirements.txt`
+---
 
 ## Manual Setup
 
-If you want to do it step by step:
+If you prefer to set up the environment step by step instead of using `setup.ps1`:
 
 ```powershell
 python -m venv venv
@@ -128,67 +173,102 @@ python train.py --csv data/raw/vowels_from_images_landmarks.csv --model-out mode
 
 ## Run the Local Prediction Demo
 
-To test the model in Python:
+To test the model in Python without the backend:
 
 ```powershell
 python live.py
 ```
 
-## Run the FastAPI Backend
+---
 
-Start the local backend:
+## FastAPI Backend API Reference
 
-```powershell
-python -m uvicorn backend_api:app --host 127.0.0.1 --port 8000
+### Prediction Endpoint
+
+**POST** `/predict`
+
+Send an image to the backend for hand detection and vowel prediction.
+
+**Form Fields:**
+
+- `file` - image file upload (`image/*`)
+- `threshold` - confidence threshold (default: `0.65`)
+- `smooth_window` - smoothing window for predictions (default: `6`)
+- `include_landmarks` - `true` to include hand landmarks in response, `false` to exclude
+
+**Example Response:**
+
+```json
+{
+  "hand_detected": true,
+  "label": "A",
+  "raw_label": "A",
+  "confidence": 0.92,
+  "probabilities": {
+    "A": 0.92,
+    "E": 0.05,
+    "I": 0.02,
+    "O": 0.01,
+    "U": 0.00
+  },
+  "handedness": "Right",
+  "handedness_score": 0.98,
+  "landmarks": [
+    {"x": 0.5, "y": 0.3},
+    ...
+  ]
+}
 ```
 
-Open the API docs in your browser:
+**Response Fields:**
 
-```text
-http://127.0.0.1:8000/docs
-```
+- `hand_detected` - boolean, whether a hand was detected
+- `label` - predicted vowel letter
+- `raw_label` - raw prediction label
+- `confidence` - confidence score (0-1)
+- `probabilities` - dict of all vowel probabilities
+- `handedness` - "Right" or "Left"
+- `handedness_score` - confidence in handedness detection
+- `landmarks` - array of hand landmark coordinates (if requested)
 
-Health check:
-
-```text
-http://127.0.0.1:8000/health
-```
-
-## FastAPI Prediction Endpoint
-
-`POST /predict`
-
-Form fields:
-
-- `file` - image upload (`image/*`)
-- `threshold` - confidence threshold, default `0.65`
-- `smooth_window` - smoothing window, default `6`
-- `include_landmarks` - `true` or `false`
-
-Example response fields:
-
-- `hand_detected`
-- `label`
-- `raw_label`
-- `confidence`
-- `probabilities`
-- `handedness`
-- `handedness_score`
-- `landmarks`
+---
 
 ## WPF Client Integration
 
-Your C# WPF app can call the local backend at:
+Your C# WPF application can communicate with the local backend to get real-time hand gesture predictions.
 
-```text
+### Backend URL
+
+```
 http://127.0.0.1:8000
 ```
 
-Use the reusable client class in your WPF project to:
+### Basic Integration Example
 
-- send a frame to `/predict`
-- receive label and confidence
-- optionally draw landmarks on a Canvas overlay
+Your WPF client can:
+
+1. **Capture frames** from a camera or image source
+2. **Send frames** to the `/predict` endpoint via HTTP POST
+3. **Receive predictions** including label and confidence
+4. **Display results** in your UI
+5. **Optionally render landmarks** on a Canvas overlay using the returned coordinates
+
+### Common Integration Pattern
+
+```
+1. User starts prediction in WPF app
+2. App captures frame from webcam
+3. App converts frame to image and POSTs to http://127.0.0.1:8000/predict
+4. Backend processes frame and returns JSON response
+5. App displays predicted vowel and confidence
+6. Optionally draw landmarks on screen using returned coordinates
+```
+
+### Prerequisites for C# Integration
+
+- Backend must be running (`python -m uvicorn backend_api:app --host 127.0.0.1 --port 8000`)
+- Your WPF application must have network access to `127.0.0.1:8000`
+- Use a C# HTTP client (e.g., `HttpClient`) to send requests
 
 ## GitHub / Version Control Notes
 
