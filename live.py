@@ -16,7 +16,7 @@ VisionRunningMode = mp.tasks.vision.RunningMode
 
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
 LANDMARKER_PATH = Path(__file__).resolve().parent / "hand_landmarker.task"
-CLASSIFIER_PATH = Path(__file__).resolve().parent / "models" / "vowel_random_forest.joblib"
+CLASSIFIER_PATH = Path(__file__).resolve().parent / "models" / "alphabet_random_forest.joblib"
 WINDOW_SIZE = 30
 FEATURE_COUNT = 63
 MOTION_LETTERS = ['J', 'Z']
@@ -44,13 +44,32 @@ def main() -> None:
 
     if not args.model.exists():
         print(f"\n[ERROR] Trained model NOT found at: {args.model}")
-        print("Please run 'python train_motion.py' first.\n")
+        print("Please run 'python train.py' or 'python train_motion.py' first.\n")
         return
 
     ensure_model_file(LANDMARKER_PATH)
     payload = joblib.load(args.model)
-    clf_frame = payload["frame_model"]
-    clf_window = payload["window_model"]
+    single_model_mode = False
+
+    if isinstance(payload, dict) and "frame_model" in payload and "window_model" in payload:
+        clf_frame = payload["frame_model"]
+        clf_window = payload["window_model"]
+        print("Loaded dual-model payload (frame + motion window).")
+    elif isinstance(payload, dict) and "model" in payload:
+        clf_frame = payload["model"]
+        clf_window = None
+        single_model_mode = True
+        print("Loaded single-model payload (static model). Motion logic disabled.")
+    elif hasattr(payload, "predict") and hasattr(payload, "predict_proba"):
+        clf_frame = payload
+        clf_window = None
+        single_model_mode = True
+        print("Loaded plain sklearn model payload. Motion logic disabled.")
+    else:
+        raise ValueError(
+            "Unsupported model format. Expected keys ['frame_model','window_model'] "
+            "or ['model'] in joblib payload."
+        )
 
     options = HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=str(LANDMARKER_PATH)),
@@ -94,36 +113,52 @@ def main() -> None:
                 landmark_history.append(features)
 
                 if len(landmark_history) == WINDOW_SIZE:
-                    # 1. Motion Prediction (Window-based)
-                    window_flat = []
-                    for f in landmark_history: window_flat.extend(f)
-                    
-                    w_probs = clf_window.predict_proba(np.array([window_flat], dtype=np.float32))[0]
-                    w_idx = int(np.argmax(w_probs))
-                    w_label = clf_window.classes_[w_idx]
-                    w_conf = float(w_probs[w_idx])
+                    if single_model_mode:
+                        # Single-model mode: majority vote across recent frame predictions.
+                        f_batch = np.array(list(landmark_history), dtype=np.float32)
+                        f_preds = clf_frame.predict(f_batch)
+                        vote_counts = Counter(f_preds)
+                        v_label, v_count = vote_counts.most_common(1)[0]
+                        v_conf = v_count / WINDOW_SIZE
 
-                    # 2. Voting Prediction (Frame-based)
-                    f_batch = np.array(list(landmark_history), dtype=np.float32)
-                    f_preds = clf_frame.predict(f_batch)
-                    vote_counts = Counter(f_preds)
-                    v_label, v_count = vote_counts.most_common(1)[0]
-                    v_conf = v_count / WINDOW_SIZE
+                        if v_conf >= args.threshold:
+                            prediction_text = f"{v_label} (Vote:{v_conf:.2f})"
+                            color = (0, 220, 0)
+                        else:
+                            prediction_text = "Analyzing..."
+                            color = (0, 165, 255)
 
-                    # 3. Decision Logic
-                    if w_label in MOTION_LETTERS and w_conf > 0.60:
-                        # Prioritize Motion Model for J and Z (Lowered threshold from 0.85)
-                        prediction_text = f"{w_label} (Motion:{w_conf:.2f})"
-                        color = (255, 100, 0)
-                    elif v_conf >= args.threshold:
-                        # Prioritize Majority Vote for static letters
-                        prediction_text = f"{v_label} (Vote:{v_conf:.2f})"
-                        color = (0, 220, 0)
+                        consensus_info = f"Top Vote: {v_label} ({v_count}/{WINDOW_SIZE})"
                     else:
-                        prediction_text = "Analyzing..."
-                        color = (0, 165, 255)
-                    
-                    consensus_info = f"Top Vote: {v_label} ({v_count}/{WINDOW_SIZE})"
+                        # 1. Motion Prediction (Window-based)
+                        window_flat = []
+                        for f in landmark_history:
+                            window_flat.extend(f)
+
+                        w_probs = clf_window.predict_proba(np.array([window_flat], dtype=np.float32))[0]
+                        w_idx = int(np.argmax(w_probs))
+                        w_label = clf_window.classes_[w_idx]
+                        w_conf = float(w_probs[w_idx])
+
+                        # 2. Voting Prediction (Frame-based)
+                        f_batch = np.array(list(landmark_history), dtype=np.float32)
+                        f_preds = clf_frame.predict(f_batch)
+                        vote_counts = Counter(f_preds)
+                        v_label, v_count = vote_counts.most_common(1)[0]
+                        v_conf = v_count / WINDOW_SIZE
+
+                        # 3. Decision Logic
+                        if w_label in MOTION_LETTERS and w_conf > 0.60:
+                            prediction_text = f"{w_label} (Motion:{w_conf:.2f})"
+                            color = (255, 100, 0)
+                        elif v_conf >= args.threshold:
+                            prediction_text = f"{v_label} (Vote:{v_conf:.2f})"
+                            color = (0, 220, 0)
+                        else:
+                            prediction_text = "Analyzing..."
+                            color = (0, 165, 255)
+
+                        consensus_info = f"Top Vote: {v_label} ({v_count}/{WINDOW_SIZE})"
                 else:
                     prediction_text = f"Buffering... ({len(landmark_history)}/{WINDOW_SIZE})"
                     color = (0, 255, 255)

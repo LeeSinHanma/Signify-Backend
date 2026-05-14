@@ -25,7 +25,7 @@ VisionRunningMode = mp.tasks.vision.RunningMode
 # Constants
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
 LANDMARKER_PATH = Path(__file__).resolve().parent / "hand_landmarker.task"
-CLASSIFIER_PATH = Path(__file__).resolve().parent / "models" / "vowel_random_forest.joblib"
+CLASSIFIER_PATH = Path(__file__).resolve().parent / "models" / "alphabet_random_forest.joblib"
 DEFAULT_THRESHOLD = 0.70
 WINDOW_SIZE = 30
 FEATURE_COUNT = 63
@@ -82,6 +82,11 @@ class AccountUpdateProgressRequest(BaseModel):
     username: str
     letter: str
     level: int
+
+class AccountUpdateMasteryRequest(BaseModel):
+    username: str
+    mastery_level: str
+    name: Optional[str] = None
 
 def ensure_model_file(model_path: Path) -> None:
     if model_path.exists() and model_path.stat().st_size > 0:
@@ -326,6 +331,27 @@ async def get_account(username: str):
 @app.post("/account/progress", tags=["Account"])
 async def update_progress(req: AccountUpdateProgressRequest):
     success, msg = account_manager.update_progress(req.username, req.letter, req.level)
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+
+    updated_account = account_manager.get_account(req.username)
+    if not updated_account:
+        raise HTTPException(status_code=404, detail="Account not found after update.")
+
+    return {
+        "success": True,
+        "message": msg,
+        "mastery_level": updated_account.get("mastery_level"),
+        "progress": updated_account.get("progress"),
+    }
+
+@app.post("/account/mastery", tags=["Account"])
+async def update_mastery(req: AccountUpdateMasteryRequest):
+    success, msg = account_manager.update_account(
+        req.username,
+        name=req.name,
+        mastery_level=req.mastery_level,
+    )
     if not success:
         raise HTTPException(status_code=400, detail=msg)
     return {"success": True, "message": msg}

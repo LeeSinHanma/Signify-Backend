@@ -12,8 +12,8 @@ VisionRunningMode = mp.tasks.vision.RunningMode
 
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
 LANDMARKER_PATH = Path(__file__).resolve().parent / "hand_landmarker.task"
-CLASSIFIER_PATH = Path(__file__).resolve().parent / "models" / "vowel_random_forest.joblib"
-BASE_CSV_PATH = Path(__file__).resolve().parent / "data" / "raw" / "vowels_from_images_landmarks.csv"
+CLASSIFIER_PATH = Path(__file__).resolve().parent / "models" / "alphabet_random_forest.joblib"
+BASE_CSV_PATH = Path(__file__).resolve().parent / "data" / "raw" / "alphabet_landmarks.csv"
 
 # Number of samples to capture in a burst when SPACE is pressed
 SAMPLES_PER_BURST = 30
@@ -59,8 +59,13 @@ def main() -> None:
 
     print("Starting Interactive Calibrator...")
     print("1. Press a letter key (A-Z) to select the sign you want to train.")
+    print("   (J and Z are saved as motion letters)")
     print("2. Press SPACE to start the capture burst.")
     print("3. Press Q to quit and retrain.")
+    print("\nData is saved to:")
+    print(f"  - Static letters: data/raw/calibration_landmarks.csv")
+    print(f"  - Motion letters: data/raw/motion_landmarks.csv")
+    print(f"  - Model: {CLASSIFIER_PATH}")
 
     with HandLandmarker.create_from_options(options) as landmarker:
         while True:
@@ -130,6 +135,7 @@ def main() -> None:
                 # Selection Stage (Waiting for Letter)
                 cv2.putText(frame, "SELECT A LETTER (A-Z)", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 3)
                 cv2.putText(frame, "Press key on keyboard...", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                cv2.putText(frame, "(J and Z are trained as motion)", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 200, 255), 2)
 
             # Hand detection status
             if not capturing:

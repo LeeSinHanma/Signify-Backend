@@ -5,7 +5,7 @@ Local sign-language hand landmark and letter prediction project.
 ## What This Project Does
 
 - Collects hand landmark data from webcam images
-- Trains a vowel classifier from landmark features
+- Trains an alphabet classifier from landmark features (A-I, K-Y, excluding J and Z)
 - Runs a local FastAPI backend for prediction
 - Integrates with a C# WPF client through HTTP
 
@@ -80,7 +80,7 @@ To stop the server, press `Ctrl+C` in the PowerShell window.
 
 - `backend_api.py` - local FastAPI prediction backend
 - `build.py` - build landmark CSV from labeled image folders
-- `collect_vowel_data.py` - collect landmark samples from webcam
+- `collect_data.py` - collect landmark samples from webcam (all alphabet letters)
 - `train.py` - train the classifier from the CSV dataset
 - `validate.py` - validate dataset quality before training
 - `live.py` - local webcam prediction demo in Python
@@ -105,14 +105,33 @@ python -m pip install -r requirements.txt
 
 ## Building the Dataset From Images
 
-Put your images into folders like this:
+Put your images into folders like this (all letters A-I, K-Y, excluding J and Z):
 
 ```text
 data/images/A/
+data/images/B/
+data/images/C/
+data/images/D/
 data/images/E/
+data/images/F/
+data/images/G/
+data/images/H/
 data/images/I/
+data/images/K/
+data/images/L/
+data/images/M/
+data/images/N/
 data/images/O/
+data/images/P/
+data/images/Q/
+data/images/R/
+data/images/S/
+data/images/T/
 data/images/U/
+data/images/V/
+data/images/W/
+data/images/X/
+data/images/Y/
 ```
 
 Then run:
@@ -123,7 +142,7 @@ python build.py
 
 That will generate or update:
 
-- `data/raw/vowels_from_images_landmarks.csv`
+- `data/raw/alphabet_landmarks.csv`
 
 If you add new images later, run `python build.py` again. It will only process new images.
 
@@ -138,7 +157,7 @@ python build.py --rebuild
 Before training, validate the CSV:
 
 ```powershell
-python validate.py --csv data/raw/vowels_from_images_landmarks.csv
+python validate.py --csv data/raw/alphabet_landmarks.csv
 ```
 
 This checks:
@@ -159,16 +178,16 @@ python train.py
 
 This reads:
 
-- `data/raw/vowels_from_images_landmarks.csv`
+- `data/raw/alphabet_landmarks.csv`
 
 And writes:
 
-- `models/vowel_random_forest.joblib`
+- `models/alphabet_random_forest.joblib`
 
 You can also train on a different CSV:
 
 ```powershell
-python train.py --csv data/raw/vowels_from_images_landmarks.csv --model-out models/vowel_random_forest.joblib
+python train.py --csv data/raw/alphabet_landmarks.csv --model-out models/alphabet_random_forest.joblib
 ```
 
 ## Run the Local Prediction Demo
@@ -187,7 +206,7 @@ python live.py
 
 **POST** `/predict`
 
-Send an image to the backend for hand detection and vowel prediction.
+Send an image to the backend for hand detection and alphabet letter prediction.
 
 **Form Fields:**
 
@@ -206,10 +225,10 @@ Send an image to the backend for hand detection and vowel prediction.
   "confidence": 0.92,
   "probabilities": {
     "A": 0.92,
-    "E": 0.05,
-    "I": 0.02,
-    "O": 0.01,
-    "U": 0.00
+    "B": 0.05,
+    "C": 0.02,
+    "D": 0.01,
+    "E": 0.00
   },
   "handedness": "Right",
   "handedness_score": 0.98,
@@ -223,10 +242,10 @@ Send an image to the backend for hand detection and vowel prediction.
 **Response Fields:**
 
 - `hand_detected` - boolean, whether a hand was detected
-- `label` - predicted vowel letter
+- `label` - predicted alphabet letter
 - `raw_label` - raw prediction label
 - `confidence` - confidence score (0-1)
-- `probabilities` - dict of all vowel probabilities
+- `probabilities` - dict of all alphabet letter probabilities
 - `handedness` - "Right" or "Left"
 - `handedness_score` - confidence in handedness detection
 - `landmarks` - array of hand landmark coordinates (if requested)
@@ -260,7 +279,7 @@ Your WPF client can:
 2. App captures frame from webcam
 3. App converts frame to image and POSTs to http://127.0.0.1:8000/predict
 4. Backend processes frame and returns JSON response
-5. App displays predicted vowel and confidence
+5. App displays predicted letter and confidence
 6. Optionally draw landmarks on screen using returned coordinates
 ```
 

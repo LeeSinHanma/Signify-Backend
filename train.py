@@ -9,8 +9,8 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection import train_test_split, RandomizedSearchCV, cross_val_score
 
-CSV_PATH = Path(__file__).resolve().parent / "data" / "raw" / "vowels_from_images_landmarks.csv"
-MODEL_PATH = Path(__file__).resolve().parent / "models" / "vowel_random_forest.joblib"
+CSV_DIR = Path(__file__).resolve().parent / "data" / "raw"
+MODEL_PATH = Path(__file__).resolve().parent / "models" / "alphabet_random_forest.joblib"
 
 def add_jitter(X, noise_level=0.005):
     """
@@ -20,38 +20,67 @@ def add_jitter(X, noise_level=0.005):
     noise = np.random.normal(0, noise_level, X.shape)
     return X + noise
 
-def load_dataset(csv_path: Path):
-    if not csv_path.exists():
-        raise FileNotFoundError(f"Dataset not found: {csv_path}")
+def load_dataset(csv_dir: Path):
+    """
+    Loads and merges all CSV files from the specified directory.
+    Combines: alphabet_landmarks.csv, calibration_landmarks.csv, motion_landmarks.csv
+    """
+    if not csv_dir.exists():
+        raise FileNotFoundError(f"Directory not found: {csv_dir}")
 
     labels = []
     features = []
-
-    with csv_path.open("r", newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            label = row["label"].strip().upper()
-            try:
-                vector = [float(row[f"f{i}"]) for i in range(63)]
-                labels.append(label)
-                features.append(vector)
-            except (ValueError, KeyError):
-                continue
+    
+    # Find all CSV files in the directory
+    csv_files = sorted(csv_dir.glob("*.csv"))
+    
+    if not csv_files:
+        raise FileNotFoundError(f"No CSV files found in: {csv_dir}")
+    
+    print(f"\nFound {len(csv_files)} CSV file(s) to merge:")
+    for csv_file in csv_files:
+        print(f"  - {csv_file.name}")
+    
+    # Load and merge all CSVs
+    for csv_file in csv_files:
+        print(f"\nLoading {csv_file.name}...")
+        file_count = 0
+        
+        try:
+            with csv_file.open("r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    label = row.get("label", "").strip().upper()
+                    if not label:
+                        continue
+                    try:
+                        vector = [float(row[f"f{i}"]) for i in range(63)]
+                        labels.append(label)
+                        features.append(vector)
+                        file_count += 1
+                    except (ValueError, KeyError):
+                        continue
+        except Exception as e:
+            print(f"  Warning: Error reading {csv_file.name}: {e}")
+            continue
+        
+        print(f"  Loaded {file_count} samples from {csv_file.name}")
 
     if not labels:
-        raise ValueError("No valid rows found in dataset.")
+        raise ValueError("No valid rows found in any dataset.")
 
+    print(f"\nTotal merged samples: {len(labels)}")
     return np.array(features, dtype=np.float32), np.array(labels)
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Optimized training for sign language classifier.")
-    parser.add_argument("--csv", type=Path, default=CSV_PATH, help="Path to landmark CSV dataset")
+    parser = argparse.ArgumentParser(description="Train sign language classifier by merging all CSVs in data/raw/.")
+    parser.add_argument("--csv-dir", type=Path, default=CSV_DIR, help="Directory containing CSV files to merge and train on")
     parser.add_argument("--model-out", type=Path, default=MODEL_PATH, help="Path to save trained model")
     parser.add_argument("--augment", action="store_true", default=True, help="Apply data augmentation (jitter)")
     args = parser.parse_args()
 
-    print(f"Loading dataset from {args.csv}...")
-    X, y = load_dataset(args.csv)
+    print(f"Loading and merging datasets from {args.csv_dir}...")
+    X, y = load_dataset(args.csv_dir)
 
     counts = Counter(y.tolist())
     print("Base class counts:", dict(counts))

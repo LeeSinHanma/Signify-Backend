@@ -14,7 +14,7 @@ VisionRunningMode = mp.tasks.vision.RunningMode
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parent / "hand_landmarker.task"
 DEFAULT_IMAGES_DIR = Path(__file__).resolve().parent / "data" / "images"
-DEFAULT_OUTPUT_CSV = Path(__file__).resolve().parent / "data" / "raw" / "vowels_from_images_landmarks.csv"
+DEFAULT_OUTPUT_CSV = Path(__file__).resolve().parent / "data" / "raw" / "alphabet_landmarks.csv"
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
@@ -91,8 +91,8 @@ def get_available_labels(images_dir: Path) -> list:
     return labels
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build landmark CSV dataset from labeled vowel image folders (incremental by default).")
-    parser.add_argument("--images-dir", type=Path, default=DEFAULT_IMAGES_DIR, help="Root image folder with A/E/I/O/U subfolders")
+    parser = argparse.ArgumentParser(description="Build landmark CSV dataset from labeled alphabet image folders (incremental by default).")
+    parser.add_argument("--images-dir", type=Path, default=DEFAULT_IMAGES_DIR, help="Root image folder with A-I, K-Y subfolders (exclude J, Z)")
     parser.add_argument("--output-csv", type=Path, default=DEFAULT_OUTPUT_CSV, help="Output CSV path")
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH, help="MediaPipe hand landmarker .task path")
     parser.add_argument("--rebuild", action="store_true", help="Rebuild from scratch (delete and recreate CSV)")

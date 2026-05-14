@@ -2,11 +2,30 @@ import csv
 import argparse
 from collections import Counter
 from pathlib import Path
+import re
 
 import numpy as np
 
-CSV_PATH = Path(__file__).resolve().parent / "data" / "raw" / "vowels_from_images_landmarks.csv"
-FEATURE_COUNT = 63
+RAW_DIR = Path(__file__).resolve().parent / "data" / "raw"
+
+
+def get_feature_columns(headers):
+    pairs = []
+    for h in headers:
+        m = re.fullmatch(r"f(\d+)", h)
+        if m:
+            pairs.append((int(m.group(1)), h))
+
+    pairs.sort(key=lambda x: x[0])
+    indices = [i for i, _ in pairs]
+    if not indices:
+        raise ValueError("CSV has no feature columns (expected f0, f1, ...).")
+
+    expected = list(range(indices[-1] + 1))
+    if indices != expected:
+        raise ValueError("Feature columns are not contiguous from f0 to fN.")
+
+    return [name for _, name in pairs]
 
 
 def load_rows(csv_path: Path):
@@ -16,27 +35,23 @@ def load_rows(csv_path: Path):
     with csv_path.open("r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames or []
-        expected = {"label"} | {f"f{i}" for i in range(FEATURE_COUNT)}
-        missing = expected - set(headers)
-        if missing:
-            raise ValueError(f"CSV is missing columns: {sorted(missing)}")
+        if "label" not in headers:
+            raise ValueError("CSV is missing 'label' column.")
+        feature_columns = get_feature_columns(headers)
 
         rows = []
         for row in reader:
             rows.append(row)
-    return rows
+    return rows, feature_columns
 
 
-def row_to_features(row):
-    return np.array([float(row[f"f{i}"]) for i in range(FEATURE_COUNT)], dtype=np.float32)
+def row_to_features(row, feature_columns):
+    return np.array([float(row[c]) for c in feature_columns], dtype=np.float32)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Validate landmark CSV dataset quality.")
-    parser.add_argument("--csv", type=Path, default=CSV_PATH, help="Path to landmark CSV dataset")
-    args = parser.parse_args()
-
-    rows = load_rows(args.csv)
+def validate_file(csv_path: Path) -> None:
+    rows, feature_columns = load_rows(csv_path)
+    feature_count = len(feature_columns)
     if not rows:
         raise ValueError("Dataset is empty.")
 
@@ -46,7 +61,6 @@ def main() -> None:
     zero_vectors = 0
 
     feature_rows = []
-    parsed_indices = []
 
     for idx, row in enumerate(rows, start=2):
         label = (row.get("label") or "").strip().upper()
@@ -55,7 +69,7 @@ def main() -> None:
             continue
 
         try:
-            features = row_to_features(row)
+            features = row_to_features(row, feature_columns)
         except Exception:
             parse_errors += 1
             continue
@@ -65,10 +79,10 @@ def main() -> None:
             zero_vectors += 1
 
         feature_rows.append(features)
-        parsed_indices.append(idx)
 
     print("=== Dataset Validation Report ===")
-    print(f"File: {args.csv}")
+    print(f"File: {csv_path}")
+    print(f"Feature columns: {feature_count}")
     print(f"Total CSV rows: {len(rows)}")
     print(f"Parsed valid rows: {len(feature_rows)}")
     print()
@@ -111,7 +125,7 @@ def main() -> None:
         X = np.stack(feature_rows)
 
         rounded = np.round(X, 6)
-        unique_rows, counts = np.unique(rounded, axis=0, return_counts=True)
+        _, counts = np.unique(rounded, axis=0, return_counts=True)
         duplicate_rows = int(np.sum(counts[counts > 1] - 1))
         duplicate_ratio = duplicate_rows / len(feature_rows)
 
@@ -133,6 +147,27 @@ def main() -> None:
 
     print()
     print("Validation complete.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Validate landmark CSV dataset quality.")
+    parser.add_argument("--csv", type=Path, help="Path to a single landmark CSV dataset")
+    parser.add_argument("--raw-dir", type=Path, default=RAW_DIR, help="Directory of CSV datasets to validate")
+    args = parser.parse_args()
+
+    if args.csv is not None:
+        validate_file(args.csv)
+        return
+
+    csv_files = sorted(args.raw_dir.glob("*.csv"))
+    if not csv_files:
+        raise FileNotFoundError(f"No CSV files found in: {args.raw_dir}")
+
+    print(f"Validating {len(csv_files)} CSV file(s) in {args.raw_dir}\n")
+    for i, csv_path in enumerate(csv_files, start=1):
+        print(f"[{i}/{len(csv_files)}] {csv_path.name}")
+        validate_file(csv_path)
+        print("-" * 60)
 
 
 if __name__ == "__main__":

@@ -10,10 +10,10 @@ from sklearn.model_selection import train_test_split
 # Constants
 WINDOW_SIZE = 30
 FEATURE_COUNT = 63
-STATIC_CSV = Path(__file__).resolve().parent / "data" / "raw" / "vowels_from_images_landmarks.csv"
+STATIC_CSV = Path(__file__).resolve().parent / "data" / "raw" / "alphabet_landmarks.csv"
 CALIB_CSV = Path(__file__).resolve().parent / "data" / "raw" / "calibration_landmarks.csv"
 MOTION_CSV = Path(__file__).resolve().parent / "data" / "raw" / "motion_landmarks.csv"
-MODEL_OUT = Path(__file__).resolve().parent / "models" / "vowel_random_forest.joblib"
+MODEL_OUT = Path(__file__).resolve().parent / "models" / "alphabet_random_forest.joblib"
 
 def load_raw_frames():
     """Loads individual frames for the static (per-frame) model."""
