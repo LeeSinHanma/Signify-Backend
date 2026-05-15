@@ -38,6 +38,9 @@ clf_window = None
 landmarker = None
 class_labels: List[str] = []
 single_model_mode = False
+frame_classes = None  # Cache for clf_frame.classes_
+window_classes = None  # Cache for clf_window.classes_
+empty_probabilities = {}  # Cache for empty probability dict
 
 # Sliding window for landmarks (Memory)
 landmark_history = deque(maxlen=WINDOW_SIZE)
@@ -88,6 +91,12 @@ class AccountUpdateMasteryRequest(BaseModel):
     mastery_level: str
     name: Optional[str] = None
 
+
+class AccountChangePasswordRequest(BaseModel):
+    username: str
+    old_password: str
+    new_password: str
+
 def ensure_model_file(model_path: Path) -> None:
     if model_path.exists() and model_path.stat().st_size > 0:
         return
@@ -96,12 +105,12 @@ def ensure_model_file(model_path: Path) -> None:
 
 def normalize_landmarks(hand_landmarks) -> List[float]:
     wrist = hand_landmarks[0]
-    centered = []
-    for lm in hand_landmarks:
-        centered.extend([lm.x - wrist.x, lm.y - wrist.y, lm.z - wrist.z])
-    max_abs = max(abs(v) for v in centered)
-    if max_abs == 0: return centered
-    return [v / max_abs for v in centered]
+    # Convert to numpy for vectorized operations
+    coords = np.array([[lm.x - wrist.x, lm.y - wrist.y, lm.z - wrist.z] for lm in hand_landmarks], dtype=np.float32)
+    max_abs = np.max(np.abs(coords))
+    if max_abs == 0:
+        return coords.flatten().tolist()
+    return (coords / max_abs).flatten().tolist()
 
 def decode_image_bytes(file_bytes: bytes):
     np_arr = np.frombuffer(file_bytes, dtype=np.uint8)
@@ -112,7 +121,7 @@ def decode_image_bytes(file_bytes: bytes):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global clf_frame, clf_window, landmarker, class_labels
+    global clf_frame, clf_window, landmarker, class_labels, frame_classes, window_classes, empty_probabilities, single_model_mode
     if not CLASSIFIER_PATH.exists():
         print(f"Warning: Classifier not found at {CLASSIFIER_PATH}. Run training first.")
     else:
@@ -120,7 +129,6 @@ async def lifespan(app: FastAPI):
         payload = joblib.load(CLASSIFIER_PATH)
         
         # Support both single-model and dual-model payloads
-        global single_model_mode
         if "frame_model" in payload and "window_model" in payload:
             clf_frame = payload["frame_model"]
             clf_window = payload["window_model"]
@@ -134,6 +142,13 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(f"Unrecognized model payload. Keys: {list(payload.keys())}")
         
         class_labels = [str(x) for x in payload.get("labels", [])]
+        
+        # Cache model classes for faster access during predictions
+        frame_classes = clf_frame.classes_
+        window_classes = clf_window.classes_ if clf_window is not None else None
+        
+        # Pre-create empty probabilities dict
+        empty_probabilities = {label: 0.0 for label in class_labels}
 
         options = HandLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=str(LANDMARKER_PATH)),
@@ -151,11 +166,12 @@ app = FastAPI(title="Sign Language Motion Backend", version="1.1.0", lifespan=li
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    return HealthResponse(
+    response = HealthResponse(
         status="ok",
         model_loaded=clf_window is not None,
         labels=class_labels,
     )
+    return response
 
 @app.post("/predict", response_model=PredictResponse)
 async def predict(
@@ -187,7 +203,7 @@ async def predict(
                 label="NO_HAND",
                 prediction_type="None",
                 confidence=0.0,
-                probabilities={label: 0.0 for label in class_labels},
+                probabilities=empty_probabilities.copy(),
             )
 
         hand_landmarks = result.hand_landmarks[0]
@@ -198,7 +214,7 @@ async def predict(
         label = "ANALYZING"
         pred_type = "Buffering"
         pred_conf = 0.0
-        probabilities = {label: 0.0 for label in class_labels}
+        probabilities = empty_probabilities.copy()
 
         if len(landmark_history) == WINDOW_SIZE:
             # Build frame batch for voting
@@ -210,11 +226,10 @@ async def predict(
 
             if clf_window is not None and not single_model_mode:
                 # Dual-model mode: use window model for motion detection
-                window_flat = []
-                for f in landmark_history: window_flat.extend(f)
-                w_probs = clf_window.predict_proba(np.array([window_flat], dtype=np.float32))[0]
+                # Faster window flattening using numpy
+                w_probs = clf_window.predict_proba(np.array([np.array(landmark_history, dtype=np.float32).flatten()], dtype=np.float32))[0]
                 w_idx = int(np.argmax(w_probs))
-                w_label = clf_window.classes_[w_idx]
+                w_label = window_classes[w_idx]
                 w_conf = float(w_probs[w_idx])
 
                 # Decision using window+vote
@@ -231,7 +246,7 @@ async def predict(
                     pred_conf = v_conf
                     pred_type = "Mixed"
                 
-                probabilities = {str(clf_window.classes_[i]): float(w_probs[i]) for i in range(len(clf_window.classes_))}
+                probabilities = {str(window_classes[i]): float(w_probs[i]) for i in range(len(window_classes))}
             else:
                 # Single-model mode: use frame voting only
                 if v_conf >= threshold:
@@ -246,7 +261,7 @@ async def predict(
                 # Average probabilities across the window
                 probs = clf_frame.predict_proba(f_batch)
                 avg_probs = np.mean(probs, axis=0)
-                probabilities = {str(clf_frame.classes_[i]): float(avg_probs[i]) for i in range(len(clf_frame.classes_))}
+                probabilities = {str(frame_classes[i]): float(avg_probs[i]) for i in range(len(frame_classes))}
 
         # Meta Data
         handedness = result.handedness[0][0].category_name if result.handedness else None
@@ -282,7 +297,7 @@ async def calibrate_endpoint(file: UploadFile = File(...), label: str = Form(...
 
 @app.post("/retrain", response_model=RetrainResponse)
 async def retrain_endpoint() -> RetrainResponse:
-    global clf_frame, clf_window, class_labels, single_model_mode
+    global clf_frame, clf_window, class_labels, single_model_mode, frame_classes, window_classes, empty_probabilities
     base_csv_path = Path(__file__).resolve().parent / "data" / "raw" / "vowels_from_images_landmarks.csv"
     
     with state_lock:
@@ -299,6 +314,11 @@ async def retrain_endpoint() -> RetrainResponse:
                 clf_window = None
                 single_model_mode = True
             class_labels = [str(x) for x in payload.get("labels", [])]
+            
+            # Update cached classes and empty probabilities
+            frame_classes = clf_frame.classes_
+            window_classes = clf_window.classes_ if clf_window is not None else None
+            empty_probabilities = {label: 0.0 for label in class_labels}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -352,6 +372,14 @@ async def update_mastery(req: AccountUpdateMasteryRequest):
         name=req.name,
         mastery_level=req.mastery_level,
     )
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"success": True, "message": msg}
+
+
+@app.post("/account/change_password", tags=["Account"])
+async def change_password(req: AccountChangePasswordRequest):
+    success, msg = account_manager.change_password(req.username, req.old_password, req.new_password)
     if not success:
         raise HTTPException(status_code=400, detail=msg)
     return {"success": True, "message": msg}

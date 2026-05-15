@@ -125,21 +125,48 @@ class AccountManager:
             
         letter = letter.upper()
         
-        account = self.get_account(username)
-        if not account:
-            return False, "Account not found."
-            
-        progress = account["progress"]
-        progress[letter] = level
-        
-        new_mastery_level = self._calculate_mastery_level(progress)
-        
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
+            # Fetch current progress in one query
+            cursor.execute('SELECT progress FROM accounts WHERE username = ?', (username,))
+            result = cursor.fetchone()
+            
+            if not result:
+                return False, "Account not found."
+            
+            progress = json.loads(result[0])
+            progress[letter] = level
+            
+            new_mastery_level = self._calculate_mastery_level(progress)
+            
+            # Update in the same connection
             cursor.execute('UPDATE accounts SET progress = ?, mastery_level = ? WHERE username = ?', 
                            (json.dumps(progress), new_mastery_level, username))
             conn.commit()
             return True, f"Progress for '{letter}' updated to {level}. Mastery is now {new_mastery_level}."
+
+    def change_password(self, username: str, old_password: str, new_password: str):
+        """Change an account's password after verifying the old password."""
+        if not new_password:
+            return False, "New password must not be empty."
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            # Verify existing password
+            cursor.execute('SELECT password_hash FROM accounts WHERE username = ?', (username,))
+            row = cursor.fetchone()
+            if not row:
+                return False, "Account not found."
+
+            current_hash = row[0]
+            if self._hash_password(old_password) != current_hash:
+                return False, "Old password is incorrect."
+
+            # Update to new password hash
+            new_hash = self._hash_password(new_password)
+            cursor.execute('UPDATE accounts SET password_hash = ? WHERE username = ?', (new_hash, username))
+            conn.commit()
+            return True, "Password changed successfully."
             
     def delete_account(self, username):
         """Deletes an account."""
